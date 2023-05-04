@@ -1,7 +1,7 @@
 from datetime import date
 
 from django.db import models
-from api.models import Apartment
+from api.models import Apartment, Account
 
 
 class Expense(models.Model):
@@ -21,6 +21,7 @@ class Expense(models.Model):
     description = models.CharField(max_length=50)
     value = models.FloatField()
     category = models.IntegerField(choices=Category.choices, default=Category.OTHER)
+    account = models.ForeignKey(Account, on_delete=models.CASCADE)
     due_date = models.DateField(default=date.today().replace(day=10))
     expense_type = models.IntegerField(choices=Type.choices, default=Type.EXCLUSIVE)
     apartment = models.ForeignKey(Apartment, on_delete=models.CASCADE, null=True, blank=True)

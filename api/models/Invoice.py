@@ -1,16 +1,24 @@
+import math
+from decimal import Decimal
+
 from django.contrib.auth.models import User
 from django.db import models
-from django.db.models.signals import post_save
+from django.db.models import Sum, F
+from django.db.models.functions import Cast
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
+from django.forms import FloatField
 from django.utils import timezone
-from api.models import Apartment, Expense
+from api.models import Apartment, Expense, CashFlow, Account
 
 
 class Invoice(models.Model):
     month_reference = models.CharField(max_length=7)
+    account = models.ForeignKey(Account, on_delete=models.CASCADE)
     apartment = models.ForeignKey(Apartment, on_delete=models.CASCADE)
     total_value = models.FloatField(default=0.00)
     paid = models.BooleanField(default=False)
+    cashflow = models.ForeignKey(CashFlow, on_delete=models.CASCADE, null=True, blank=True)
 
     def __str__(self):
         return f"Invoice {self.pk} - {self.apartment}"
@@ -35,31 +43,61 @@ class InvoiceGenerationLog(models.Model):
 
 
 @receiver(post_save, sender=InvoiceGenerationLog)
-def pre_save_generation_invoices(sender, instance, created, **kwargs):
+def post_save_generation_invoices(sender, instance, created, **kwargs):
     if created:
         generate_invoices(instance.reference_month)
 
 
+@receiver(pre_save, sender=Invoice)
+def pre_save_payment_invoices(sender, instance, **kwargs):
+    old_instance = sender.objects.get(pk=instance.pk)
+    if old_instance.paid != instance.paid:
+        add_cashflow(description=f"Pagamento condomínio - {instance.month_reference} - Apartamento - {instance.apartment.number}" ,
+                     value=instance.total_value,
+                     date=timezone.now(),
+                     account=instance.account,
+                     invoice=instance,
+                     cashflow_type=CashFlow.Type.INFLOW)
+
+
+def add_cashflow(description, value, date, account, invoice, cashflow_type):
+    inflow = CashFlow.objects.create(
+        description=description,
+        value=value,
+        date=date,
+        account=account,
+        type=cashflow_type,
+        invoice=invoice,
+        balance=0.00,
+    )
+
+
+
 def generate_invoices(reference_date):
+    apartments = Apartment.objects.all()
     expenses = Expense.objects.filter(invoiced=False,
                                       due_date__month=reference_date.month,
                                       due_date__year=reference_date.year)
-    apartments = Apartment.objects.filter(account__in=expenses).distinct()
 
     for apartment in apartments:
         invoice = Invoice.objects.create(month_reference=reference_date.strftime('%m-%Y'), apartment=apartment)
         for expense in expenses:
             if expense.expense_type == expense.Type.EXCLUSIVE and expense.apartment == apartment:
-                item = InvoiceItem.objects.create(invoice=invoice, expense=expense, value=expense.value)
-                invoice.total_value = round(invoice.total_value + expense.value, 0)
-                # expense.paid = True
-                expense.invoiced = True
-                expense.save()
+                item = InvoiceItem.objects.create(invoice=invoice,
+                                                  expense=expense,
+                                                  value=round(expense.value, 2))
+                item_value = item.value
             elif expense.expense_type == expense.Type.SHARED:
-                item = InvoiceItem.objects.create(invoice=invoice, expense=expense,
-                                                  value=expense.value / apartments.count())
-                invoice.total_value = round(invoice.total_value + (expense.value / apartments.count()), 0)
-                # expense.paid = True
-                expense.invoiced = True
-                expense.save()
+                item = InvoiceItem.objects.create(invoice=invoice,
+                                                  expense=expense,
+                                                  value=round(expense.value / apartments.count(), 2))
+                item_value = item.value
+            else:
+                item_value = 0
+
+            invoice.total_value = invoice.total_value + item_value
+            # expense.paid = True
+            expense.invoiced = True
+            expense.save()
+        invoice.total_value = math.ceil(invoice.total_value)
         invoice.save()
